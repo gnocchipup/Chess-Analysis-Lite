@@ -13,12 +13,16 @@ Frontend-only PGN viewer + material-engine annotator. No build, no backend — j
   - `simple material loss` — allowed the opponent a material win.
   Verdict is shown inline in the movelist, in the Blunders panel, and appended as a PGN comment `{ blunder — <verdict> }`.
 - **Export annotated PGN**: Update preview → Copy / Download `annotated.pgn`. Headers (players/ratings/etc.) preserved, evals re-emitted as `[%eval]`, verdicts as comments.
+- **Batch analysis (`batch.html`)**: drop a **multi-game** PGN → every game is split, parsed, and its Lichess-tagged blunders are classified with the **same 5s/position material engine**, then you download two files: an **`annotated.pgn`** (all games, original headers/evals/glyphs kept, `{ blunder — <verdict> }` appended) and a **`report.csv`** — one row per game with `GameLink, White, WhiteElo, Black, BlackElo, Result, Date, Moves` plus per-side `Blunders / Positional / SimpleMiss / SimpleLoss / Mistakes / Inaccuracies`. A reused Web Worker pool (`min(4, cores)`) parallelizes positions, with a live progress bar.
 
 ## Run
 Just double-click `index.html`, or: `npx serve .` then open the URL. Everything runs in-browser; Lichess fetch uses CORS-enabled `lichess.org/game/export`.
+For batch, open **`batch.html`** the same way (static serve recommended so the `engine.js` Web Worker loads, e.g. `npx serve .` → `/batch.html`).
 
 ## Files
 - `index.html` — UI + PGN parser, Lichess fetch, Lichess-tagged blunder classifier, PGN builder.
+- `batch.html` — batch UI: drop a multi-game PGN → downloads `annotated.pgn` + `report.csv`; reused worker pool + progress.
+- `analyze.js` — DOM-free shared pipeline (`splitGames` / `parseGame` / `verdictFor` / `buildGamePgn` / `buildRow` / `toCsv`); `window.Analyze` in the browser, `require()`-able in Node for headless tests.
 - `engine.js` — material-only 0x88 engine (alpha-beta + quiescence, also usable as Web Worker / Node CLI: `node engine.js "<fen>" [seconds]`).
 - `pieces/*.svg` — (unused by current unicode-glyph board; kept for future SVG board).
 - `.gitignore` — frontend-only ignores.

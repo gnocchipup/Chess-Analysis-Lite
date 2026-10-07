@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Batch PGN Analyzer</title>
+<style>
+:root{--bg:#161512;--fg:#d6d4cf;--mut:#8a8883;--card:#262421;--acc:#1e88e5}
+body{margin:0;padding:14px;background:var(--bg);color:var(--fg);font:14px system-ui,sans-serif}
+h1{font-size:18px;margin:0 0 10px}
+.wrap{max-width:1000px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+.card{background:var(--card);border-radius:6px;padding:10px 12px}
+button,select{background:#3a3733;color:var(--fg);border:0;border-radius:4px;padding:7px 14px;font-size:14px;cursor:pointer}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.p{background:var(--acc);color:#fff}
+#drop{border:2px dashed #555;border-radius:8px;padding:22px;text-align:center;color:var(--mut);cursor:pointer}
+#drop.hot{border-color:var(--acc);color:var(--fg)}
+.ctl{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+label{color:var(--mut)}
+#barOut{height:14px;background:#111;border-radius:7px;overflow:hidden}
+#bar{height:100%;width:0;background:var(--acc);transition:width .2s}
+#stat{color:var(--mut);font-size:12px;margin-top:6px;line-height:1.5;white-space:pre-wrap}
+textarea{width:100%;box-sizing:border-box;height:170px;background:#111;color:var(--fg);border:1px solid #333;border-radius:4px;font:12px monospace}
+#outcsv{height:150px}
+.pill{display:inline-block;background:#111;border-radius:3px;padding:1px 6px;color:var(--mut)}
+</style></head><body>
+<div class="wrap">
+  <h1>Batch PGN Analyzer <span style="color:var(--mut);font-size:12px">— multi-game · Lichess-tagged blunders · material verdicts · <a href="index.html" style="color:var(--acc)">single-game analyzer →</a></span></h1>
+
+  <div class="card">
+    <div id="drop" tabindex="0">Drop a multi-game <b>.pgn</b> here, or click to choose a file</div>
+    <input id="file" type="file" accept=".pgn,text/plain" style="display:none">
+  </div>
+
+  <div class="card ctl">
+    <label>Engine per position
+      <select id="secs">
+        <option value="0.5">0.5s</option>
+        <option value="1">1s</option>
+        <option value="2">2s</option>
+        <option value="5" selected>5s (parity)</option>
+      </select>
+    </label>
+    <button id="go" class="p">Analyze</button>
+    <button id="dlpgn" disabled>Download annotated.pgn</button>
+    <button id="dlcsv" disabled>Download report.csv</button>
+    <span id="wcount" class="pill"></span>
+  </div>
+
+  <div class="card">
+    <div id="barOut"><div id="bar"></div></div>
+    <div id="stat">Pick a PGN file to begin. Blunders are the moves Lichess already tagged (?? glyph or $4 NAG); each is scored 5s pre + 5s post with the bundled material engine.</div>
+  </div>
+
+  <div class="card"><b>report.csv</b><textarea id="outcsv" readonly placeholder="CSV report will appear here"></textarea></div>
+  <div class="card"><b>annotated.pgn</b><textarea id="outpgn" readonly placeholder="Annotated PGN will appear here"></textarea></div>
+</div>
+<script src="engine.js"></script>
+<script src="analyze.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const WORKERS = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2)));
+let pool = null, busy = false;
+
+// Reuse a fixed set of workers for the whole batch (index.html spawns one per position).
+class WorkerPool {
+  constructor(n) {
+    this.workers = []; this.idle = []; this.q = [];
+    for (let i = 0; i < n; i++) { const w = new Worker('engine.js'); this.workers.push(w); this.idle.push(w); }
+  }
+  run(fen, ms) { return new Promise(resolve => { this.q.push({ fen, ms, resolve }); this._pump(); }); }
+  _pump() { while (this.idle.length && this.q.length) this._exec(this.idle.pop(), this.q.shift()); }
+  _exec(w, t) {
+    let best = null;
+    const stm = (t.fen.split(' ')[1] === 'w') ? 1 : -1;  // engine score is side-to-move POV; convert to White-POV
+    w.onmessage = ev => {
+      const d = ev.data;
+      if (d.done) { w.onmessage = null; this.idle.push(w); t.resolve(best ? { score: best.score * stm, pv: best.pv } : null); this._pump(); }
+      else if (d.multipv === 1) best = { score: d.score, pv: d.pv };
+    };
+    w.postMessage({ fen: t.fen, ms: t.ms, depth: 60, multipv: 1 });
+  }
+  terminate() { this.workers.forEach(w => w.terminate()); this.workers = []; this.idle = []; this.q = []; }
+}
+
+const setStat = s => $('stat').textContent = s;
+const bar = pct => $('bar').style.width = Math.max(0, Math.min(100, pct)) + '%';
+function setFile() {
+  const f = $('file').files[0];
+  $('drop').innerHTML = f ? `Selected: <b>${f.name}</b> (${(f.size / 1024).toFixed(1)} KB)` : 'Drop a multi-game <b>.pgn</b> here, or click to choose a file';
+}
+function download(name, text) {
+  const b = new Blob([text], { type: name.endsWith('.csv') ? 'text/csv' : 'application/x-chess-pgn' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+async function run() {
+  if (busy) return;
+  const file = $('file').files[0];
+  if (!file) { setStat('Choose a .pgn file first.'); return; }
+  if (typeof Engine === 'undefined' || typeof Analyze === 'undefined') { setStat('engine.js / analyze.js failed to load.'); return; }
+  busy = true; $('go').disabled = true; $('dlpgn').disabled = true; $('dlcsv').disabled = true;
+  $('outcsv').value = ''; $('outpgn').value = ''; bar(0);
+  try {
+    const text = await file.text();
+    const games = Analyze.splitGames(text);
+    if (!games.length) { setStat('No games found in file.'); return; }
+    const ms = Math.round(parseFloat($('secs').value) * 1000);
+    const parsed = games.map(g => Analyze.parseGame(g, Engine));
+    const grandTotal = parsed.reduce((a, g) => a + g.blunders.length * 2, 0);
+    let grandDone = 0;
+    const t0 = Date.now();
+    if (pool) pool.terminate(); pool = new WorkerPool(WORKERS);
+    setStat(`Parsing ${parsed.length} game(s) · ${grandTotal / 2} blunder(s) · ${WORKERS} worker(s)…`);
+    const rows = [], pgnParts = [];
+    for (let gi = 0; gi < parsed.length; gi++) {
+      const g = parsed[gi];
+      const tasks = [];
+      for (const k of g.blunders) { tasks.push({ k, w: 0, fen: g.fens[k - 1] }); tasks.push({ k, w: 1, fen: g.fens[k] }); }
+      const map = {};
+      if (tasks.length) {
+        await Promise.all(tasks.map(t => pool.run(t.fen, ms).then(r => {
+          map[t.k + ':' + t.w] = r; grandDone++;
+          bar(grandTotal ? grandDone / grandTotal * 100 : 100);
+          setStat(`Game ${gi + 1}/${parsed.length} · position ${grandDone}/${grandTotal} · ${((Date.now() - t0) / 1000).toFixed(0)}s elapsed`);
+        })));
+      }
+      for (const k of g.blunders) {
+        const sgn = (g.fens[k - 1].split(' ')[1] === 'w') ? 1 : -1;   // convert White-POV scores to mover-POV
+        const r0 = map[k + ':0'], r1 = map[k + ':1'];
+        const S0 = r0 ? r0.score * sgn : null, S1 = r1 ? r1.score * sgn : null;
+        g.verdicts[k] = Analyze.verdictFor(S0, S1);
+      }
+      rows.push(Analyze.buildRow(g));
+      pgnParts.push(Analyze.buildGamePgn(g));
+      $('outcsv').value = Analyze.toCsv([Analyze.HEADER].concat(rows));
+      $('outpgn').value = pgnParts.join('\n') + '\n';
+    }
+    bar(100);
+    $('dlpgn').disabled = false; $('dlcsv').disabled = false;
+    const blunders = parsed.reduce((a, g) => a + g.blunders.length, 0);
+    setStat(`Done — ${parsed.length} game(s), ${blunders} blunder(s) classified in ${((Date.now() - t0) / 1000).toFixed(1)}s.\nSave annotated.pgn and report.csv with the buttons above.`);
+  } catch (e) {
+    setStat('Error: ' + (e && e.message ? e.message : e));
+  } finally {
+    busy = false; $('go').disabled = false;
+    if (pool) { pool.terminate(); pool = null; }
+  }
+}
+
+$('go').onclick = run;
+$('wcount').textContent = WORKERS + ' engine worker(s)';
+$('drop').onclick = () => $('file').click();
+$('file').onchange = setFile;
+$('dlpgn').onclick = () => download('annotated.pgn', $('outpgn').value);
+$('dlcsv').onclick = () => download('report.csv', $('outcsv').value);
+['dragenter', 'dragover'].forEach(ev => $('drop').addEventListener(ev, e => { e.preventDefault(); $('drop').classList.add('hot'); }));
+['dragleave', 'drop'].forEach(ev => $('drop').addEventListener(ev, e => { e.preventDefault(); $('drop').classList.remove('hot'); }));
+$('drop').addEventListener('drop', e => { if (e.dataTransfer.files.length) { $('file').files = e.dataTransfer.files; setFile(); } });
+</script></body></html>
