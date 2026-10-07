@@ -212,9 +212,21 @@ function loadPgn(raw) {
     else { firstMove = false; if (!pushMove(tok)) break; }
   }
   const hasEvals = !!evals.slice(1).find(v => v !== null && v !== undefined);
-  if (!hasEvals && sans.length && !err) $('bl').textContent = 'No server evals — scanning locally (~0.4s/position, ?? markers still count)…';
-  detectLocal().then(() => { meta(); renderBl(); moveList(); });
-  meta(); show(0); if (hasEvals || !sans.length || err) renderBl();
+  // Check for Lichess blunder markers (?? or $4) in the parsed PGN
+  const hasLichessBlunderMarkers = nags.some(n => n && n.includes('$4')) || 
+    sans.some(s => /⁇|\?\?/.test(s));
+  
+  if (!hasLichessBlunderMarkers) {
+    // No Lichess blunder markers: skip ALL local engine evaluation
+    blunders = [];
+    $('bl').textContent = 'No Lichess blunder markers (??, $4) found — local engine evaluation skipped.';
+    meta(); renderBl(); moveList(); show(0);
+  } else {
+    // Has Lichess blunder markers: proceed with detection (and local scan if needed)
+    if (!hasEvals && sans.length && !err) $('bl').textContent = 'No server evals — scanning locally (~0.4s/position, ?? markers still count)…';
+    detectLocal().then(() => { meta(); renderBl(); moveList(); });
+    meta(); show(0); if (hasEvals || !sans.length || err) renderBl();
+  }
   if (err) $('hdr').textContent = err;
 }
 
@@ -281,7 +293,13 @@ function renderBl() {
 //     else => "simple material loss" (allowed opponent win)
 //   else => "positional"
 async function classify() {
-  if (!blunders.length) { $('bl').textContent = 'No blunders to classify. Load a Lichess game first.'; return; }
+  if (!blunders.length) { 
+    const hasMarkers = nags.some(n => n && n.includes('$4')) || sans.some(s => /⁇|\?\?/.test(s));
+    $('bl').textContent = hasMarkers 
+      ? 'No blunders detected. Load a Lichess game first.' 
+      : 'No Lichess blunder markers (??, $4) found — classification skipped.';
+    return; 
+  }
   $('bl').textContent = 'Classifying with material engine (5s × 2 per blunder)…';
   for (const k of blunders) {
     const moverWhite = fens[k - 1].split(' ')[1] === 'w';
