@@ -245,30 +245,29 @@ function renderBl() {
   }).join('<br>');
 }
 
-// Task 5+6: for each Lichess blunder, run material engine 5s on pre+post positions.
-// If material swing >=100cp (mover-pov) => material; then missed win vs allowed loss:
-//   bestPre (mover) vs actual post (mover-pov): if bestPre - postAfter >= 100 => allowed loss? refine:
-//   - missed win: pre-move best line already winning (>=+200 mover) and played move throws it (post <= +50)
-//   - material loss: post-move opponent best reply wins material (oppPV score high)
-// Simplified deterministic rule using material engine scores (both White-POV via engFull):
-//   S0 = engine(fens[k-1]) mover-pov, S1 = engine(fens[k]) mover-pov (opp reply baked into search)
-//   If S0 - S1 >=100 => material.
-//     if S0 >=150 and S1 <=50 => "simple material miss" (had win, missed it)
-//     else => "simple material loss" (allowed opponent win)
-//   else => "positional"
+// For each Lichess blunder, score the pre- and post-move positions (5s each).
+//   mp0       = static material parity (mover-POV) before the move
+//   s1best    = best-play eval from the pre-move position (mover is side to move there)
+//   s1blunder = eval after the played move (opponent's best reply baked into the search)
+//   cpMiss = s1best - mp0      (material the best move could have gained over parity)
+//   cpLoss = mp0    - s1blunder (material the played move gave up below parity)
+// If max(cpMiss,cpLoss) < 100cp => "positional"; else the larger decides (tie => loss).
+// A forced loss makes cpMiss <= 0, so it is never mislabeled a "miss".
 async function classify() {
   if (!blunders.length) { $('bl').textContent = 'No Lichess-tagged blunders (?? glyph or $4) to classify.'; return; }
   $('bl').textContent = 'Classifying with material engine (5s × 2 per blunder)…';
   for (const k of blunders) {
-    const moverWhite = fens[k - 1].split(' ')[1] === 'w';
-    const sgn = moverWhite ? 1 : -1;
+    const sgn = fens[k - 1].split(' ')[1] === 'w' ? 1 : -1;   // mover-POV sign
     const r0 = await engFull(fens[k - 1], 5000), r1 = await engFull(fens[k], 5000);
     // engFull returns White-POV, so × sgn converts to mover-POV. No extra negation:
-    // post-move search already includes the opponent's best reply.
-    const S0 = r0 ? r0.score * sgn : null, S1 = r1 ? r1.score * sgn : null;
+    // the post-move search already includes the opponent's best reply.
+    const s1best = r0 ? r0.score * sgn : null;      // best play from the pre-move position
+    const s1blunder = r1 ? r1.score * sgn : null;   // after the played move
+    const mp0 = new Engine(fens[k - 1]).mat * sgn;  // static material parity before the move
     let v = 'positional';
-    if (S0 !== null && S1 !== null && (S0 - S1) >= 100) {
-      v = (S0 >= 150 && S1 <= 50) ? 'simple material miss' : 'simple material loss';
+    if (s1best !== null && s1blunder !== null) {
+      const cpMiss = s1best - mp0, cpLoss = mp0 - s1blunder;
+      if (Math.max(cpMiss, cpLoss) >= 100) v = cpMiss > cpLoss ? 'simple material miss' : 'simple material loss';
     }
     verdicts[k] = v;
     // append comment for export: "blunder — <verdict>"

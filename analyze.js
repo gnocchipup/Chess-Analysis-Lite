@@ -132,10 +132,27 @@
     return out;
   }
 
-  // Material verdict from mover-POV scores (S0 = pre-move, S1 = post-move), identical rule to index.html.
-  function verdictFor(S0, S1) {
-    if (S0 !== null && S1 !== null && (S0 - S1) >= 100)
-      return (S0 >= 150 && S1 <= 50) ? 'simple material miss' : 'simple material loss';
+  // Static material parity (piece values only, NO search), mover(side-to-move)-POV.
+  // Caveat: raw count — in a mid-trade position it does not settle the pending recapture,
+  // so it can be off by ~a piece for that one ply.
+  function materialParity(fen, EngineCls) {
+    const stm = fen.split(' ')[1] === 'w' ? 1 : -1;
+    return new EngineCls(fen).mat * stm;   // engine .mat is White-POV; flip to side-to-move POV
+  }
+
+  // Material verdict (all centipawns, mover-POV), identical rule to index.html:
+  //   mp0       = static material parity before the move
+  //   s1best    = best-play eval from the pre-move position (== the pos0 search root score)
+  //   s1blunder = eval after the played move (opponent's best reply is baked into the search)
+  //   cpMiss = s1best - mp0      (material the best move could have gained over parity)
+  //   cpLoss = mp0    - s1blunder (material the played move gave up below parity)
+  // If max(cpMiss,cpLoss) < 100cp => positional; else the larger decides (tie => loss).
+  // Because s1best is searched, a forced loss (piece already hanging) makes cpMiss <= 0,
+  // so it is never mislabeled a "miss".
+  function verdictFor(mp0, s1best, s1blunder) {
+    if (mp0 === null || s1best === null || s1blunder === null) return 'positional';
+    const cpMiss = s1best - mp0, cpLoss = mp0 - s1blunder;
+    if (Math.max(cpMiss, cpLoss) >= 100) return cpMiss > cpLoss ? 'simple material miss' : 'simple material loss';
     return 'positional';
   }
 
@@ -211,5 +228,5 @@
     return h;
   }
 
-  return { START, HEADER, splitGames, parseGame, detectBlunders, verdictFor, colorTally, buildRow, csvEscape, toCsv, buildGamePgn };
+  return { START, HEADER, splitGames, parseGame, detectBlunders, materialParity, verdictFor, colorTally, buildRow, csvEscape, toCsv, buildGamePgn };
 });

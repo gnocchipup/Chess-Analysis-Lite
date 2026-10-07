@@ -127,8 +127,10 @@ async function run() {
       for (const k of g.blunders) {
         const sgn = (g.fens[k - 1].split(' ')[1] === 'w') ? 1 : -1;   // convert White-POV scores to mover-POV
         const r0 = map[k + ':0'], r1 = map[k + ':1'];
-        const S0 = r0 ? r0.score * sgn : null, S1 = r1 ? r1.score * sgn : null;
-        g.verdicts[k] = Analyze.verdictFor(S0, S1);
+        const s1best = r0 ? r0.score * sgn : null;      // best play from pos0 (root score)
+        const s1blunder = r1 ? r1.score * sgn : null;   // after the played move
+        const mp0 = Analyze.materialParity(g.fens[k - 1], Engine);  // static material parity before the move
+        g.verdicts[k] = Analyze.verdictFor(mp0, s1best, s1blunder);
       }
       rows.push(Analyze.buildRow(g));
       pgnParts.push(Analyze.buildGamePgn(g));
