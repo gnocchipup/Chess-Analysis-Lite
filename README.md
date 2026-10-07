@@ -7,7 +7,7 @@ Frontend-only PGN viewer + material-engine annotator. No build, no backend — j
 - **Lichess import with `evals=true`**: paste a game URL like `https://lichess.org/xxxxxxxx` (or bare 8-char ID) → Fetch calls:
   `GET https://lichess.org/game/export/{id}?moves=1&tags=1&clocks=1&evals=1&opening=1&literate=1`
   and loads PGN headers (players, ratings, Event/Site/Date, ECO/Opening, Result) plus per-move `[%eval x]` / mate markers, `??`/inaccuracy/mistake/blunder glyphs (`!?`, `$1..$4`), and comments.
-- **Blunder detection**: for Lichess imports (server evals present) trusts Lichess server markers (`??`, `$4`) only — no extra eval-drop rule, so `?` moves like 47...e3 (`?`, not `??`) stay untagged. Mate scores (`[%eval #N]`) parse to ±99900. For pasted PGNs without server evals, a quick local scan (~400ms/pos) fills evals first; `??`/`$4` markers count there too, plus a flat mover-POV drop `>= 100cp` applies.
+- **Blunder detection (Lichess-tagged only)**: blunders are exactly the moves Lichess already tagged — a `??` glyph on the move, or a `$4` blunder NAG. There is **no local engine scan and no eval-drop heuristic**, so `?!` inaccuracies and `?` mistakes stay untagged (e.g. `17. Nd5?!` and `17... Bxd5?`). Mate scores (`[%eval #N]`) parse to ±99900 for display only. A PGN with no `??`/`$4` markers yields zero blunders and triggers no engine evaluation.
 - **Material litigator (5s each)**: for every Lichess blunder, the bundled material-only engine (`engine.js`, Web Worker) runs 5s on the pre- and post-blunder positions. If mover-POV swing `S0 - S1 >= 100cp` → material, else `positional`. Material splits into:
   - `simple material miss` — had a winning line (`S0 >= 150`) and threw it (`S1 <= 50`), i.e. missed a material win;
   - `simple material loss` — allowed the opponent a material win.
@@ -18,7 +18,7 @@ Frontend-only PGN viewer + material-engine annotator. No build, no backend — j
 Just double-click `index.html`, or: `npx serve .` then open the URL. Everything runs in-browser; Lichess fetch uses CORS-enabled `lichess.org/game/export`.
 
 ## Files
-- `index.html` — UI + PGN parser, Lichess fetch, blunder detect/classify, PGN builder.
+- `index.html` — UI + PGN parser, Lichess fetch, Lichess-tagged blunder classifier, PGN builder.
 - `engine.js` — material-only 0x88 engine (alpha-beta + quiescence, also usable as Web Worker / Node CLI: `node engine.js "<fen>" [seconds]`).
 - `pieces/*.svg` — (unused by current unicode-glyph board; kept for future SVG board).
 - `.gitignore` — frontend-only ignores.

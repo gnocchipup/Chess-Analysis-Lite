@@ -211,60 +211,23 @@ function loadPgn(raw) {
     else if (/^[!?]+$/.test(tok)) { if (sans.length || nags.length > 1) { const k = sans.length; nags[k] = (nags[k] || '') + tok; sans[k - 1] = (sans[k - 1] || '') + tok; } }
     else { firstMove = false; if (!pushMove(tok)) break; }
   }
-  const hasEvals = !!evals.slice(1).find(v => v !== null && v !== undefined);
-  // Check for Lichess blunder markers (?? or $4) in the parsed PGN
-  const hasLichessBlunderMarkers = nags.some(n => n && n.includes('$4')) || 
-    sans.some(s => /⁇|\?\?/.test(s));
-  
-  if (!hasLichessBlunderMarkers) {
-    // No Lichess blunder markers: skip ALL local engine evaluation
-    blunders = [];
-    $('bl').textContent = 'No Lichess blunder markers (??, $4) found — local engine evaluation skipped.';
-    meta(); renderBl(); moveList(); show(0);
-  } else {
-    // Has Lichess blunder markers: proceed with detection (and local scan if needed)
-    if (!hasEvals && sans.length && !err) $('bl').textContent = 'No server evals — scanning locally (~0.4s/position, ?? markers still count)…';
-    detectLocal().then(() => { meta(); renderBl(); moveList(); });
-    meta(); show(0); if (hasEvals || !sans.length || err) renderBl();
-  }
+  // Blunders = ONLY what Lichess already tagged (?? glyph or $4 NAG).
+  // No local engine scan and no eval-drop heuristic runs on load; the 5s
+  // material "classify" step (on demand) runs only on these Lichess-tagged moves.
+  detectBlunders();
+  meta(); renderBl(); moveList(); show(0);
   if (err) $('hdr').textContent = err;
 }
 
-// blunder detection: trust Lichess server markers (?? / $4) only when server evals exist.
-// Pasted PGNs without server evals fall back to a quick local scan (~400ms/pos, >=100cp drop).
 // Mate scores ([%eval #N]) map to +/-99900 so "8.65 -> Mate in 6" no longer reads as null.
 function mateScore(n) { return n > 0 ? 99900 : n < 0 ? -99900 : 0; }
-function pov(ev, moverIsWhite) { // lichess evals are white-pov cp; convert to mover-pov
-  if (ev === null || ev === undefined) return null;
-  if (Math.abs(ev) > 90000) return ev > 0 ? (moverIsWhite ? 99900 : -99900) : (moverIsWhite ? -99900 : 99900);
-  return moverIsWhite ? ev : -ev;
-}
-async function detectLocal() {
+// Blunders = ONLY what Lichess already tagged: a "??" glyph on the move or a $4 NAG.
+// No local engine scan and no eval-drop heuristic — nothing is inferred locally.
+function detectBlunders() {
   blunders = [];
-  const isLich = !!evals.slice(1).find(v => v !== null && v !== undefined);
-  if (!isLich) { // no server evals: run quick local scan ~400ms/pos for eval drop
-    for (let k = 1; k <= sans.length; k++) {
-      const sc = await engScore(fens[k - 1], 400);
-      evals[k] = sc; lichEvals[k] = null;
-    }
-  }
-  for (let k = 1; k <= sans.length; k++) {
-    const moverWhite = fens[k - 1].split(' ')[1] === 'w';
-    const prev = pov(k === 1 ? (lichEvals[0] ?? evals[0] ?? 20) : evals[k - 1], moverWhite);
-    const cur = pov(evals[k], moverWhite);
-    const nagB = (nags[k] || '').includes('$4') || /⁇|\?\?/.test(sans[k - 1] || '');
-    if (isLich) { if (nagB) blunders.push(k); continue; } // Lichess game: only ?? markers count
-    let drop = (prev !== null && cur !== null) ? prev - cur : null;
-    if (nagB || (drop !== null && drop >= 100)) blunders.push(k); // local game: ?? markers count, plus flat 100cp rule
-  }
-}
-function engScore(fen, ms) {
-  return new Promise(res => {
-    const w = new Worker('engine.js'); let got = null;
-    w.onmessage = ev => { if (!ev.data.done) got = ev.data; };
-    w.postMessage({ fen, ms, depth: 30, multipv: 1 });
-    setTimeout(() => { try { w.terminate(); } catch (_) {} res(got ? got.score * (fen.split(' ')[1] === 'w' ? 1 : -1) : null); }, ms + 60);
-  });
+  for (let k = 1; k <= sans.length; k++)
+    if ((nags[k] || '').includes('$4') || /⁇|\?\?/.test(sans[k - 1] || '')) blunders.push(k);
+  return blunders;
 }
 function meta() {
   const w = tags.White || '?', b = tags.Black || '?', wr = tags.WhiteElo ? ` (${tags.WhiteElo})` : '', br = tags.BlackElo ? ` (${tags.BlackElo})` : '';
@@ -273,7 +236,7 @@ function meta() {
 }
 
 function renderBl() {
-  if (!blunders.length) { const nEv = lichEvals.slice(1).filter(v => v !== null && v !== undefined).length; $('bl').innerHTML = sans.length ? `No blunders detected (need ?? markers or ≥100cp eval drop). <span style="color:var(--mut)">Parsed ${sans.length} moves, ${nEv} server evals.</span>` : 'No blunder analysis yet.'; return; }
+  if (!blunders.length) { const nEv = lichEvals.slice(1).filter(v => v !== null && v !== undefined).length; $('bl').innerHTML = sans.length ? `No Lichess-tagged blunders (?? glyph or $4). <span style="color:var(--mut)">Parsed ${sans.length} moves, ${nEv} server evals — no local engine eval run.</span>` : 'No blunder analysis yet.'; return; }
   $('bl').innerHTML = '<b>Blunders:</b><br>' + blunders.map(k => {
     const mv = Math.floor((k - 1) / 2) + 1, w = fens[k - 1].split(' ')[1] === 'w';
     const v = verdicts[k] ? ` — <b>${verdicts[k]}</b>` : ' — <i>unclassified (press Classify)</i>';
@@ -293,13 +256,7 @@ function renderBl() {
 //     else => "simple material loss" (allowed opponent win)
 //   else => "positional"
 async function classify() {
-  if (!blunders.length) { 
-    const hasMarkers = nags.some(n => n && n.includes('$4')) || sans.some(s => /⁇|\?\?/.test(s));
-    $('bl').textContent = hasMarkers 
-      ? 'No blunders detected. Load a Lichess game first.' 
-      : 'No Lichess blunder markers (??, $4) found — classification skipped.';
-    return; 
-  }
+  if (!blunders.length) { $('bl').textContent = 'No Lichess-tagged blunders (?? glyph or $4) to classify.'; return; }
   $('bl').textContent = 'Classifying with material engine (5s × 2 per blunder)…';
   for (const k of blunders) {
     const moverWhite = fens[k - 1].split(' ')[1] === 'w';
