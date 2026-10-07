@@ -7,7 +7,7 @@ Frontend-only PGN viewer + material-engine annotator. No build, no backend — j
 - **Lichess import with `evals=true`**: paste a game URL like `https://lichess.org/xxxxxxxx` (or bare 8-char ID) → Fetch calls:
   `GET https://lichess.org/game/export/{id}?moves=1&tags=1&clocks=1&evals=1&opening=1&literate=1`
   and loads PGN headers (players, ratings, Event/Site/Date, ECO/Opening, Result) plus per-move `[%eval x]` / mate markers, `??`/inaccuracy/mistake/blunder glyphs (`!?`, `$1..$4`), and comments.
-- **Blunder detection**: for Lichess imports (server evals present) trusts Lichess server markers (`??`, `$4`) only — no extra eval-drop rule, so `?` moves like 47...e3 (`?`, not `??`) stay untagged. Mate scores (`[%eval #N]`) parse to ±99900. For pasted PGNs without server evals, a quick local scan (~400ms/pos) fills evals first and a flat mover-POV drop `>= 100cp` applies.
+- **Blunder detection**: for Lichess imports (server evals present) trusts Lichess server markers (`??`, `$4`) only — no extra eval-drop rule, so `?` moves like 47...e3 (`?`, not `??`) stay untagged. Mate scores (`[%eval #N]`) parse to ±99900. For pasted PGNs without server evals, a quick local scan (~400ms/pos) fills evals first; `??`/`$4` markers count there too, plus a flat mover-POV drop `>= 100cp` applies.
 - **Material litigator (5s each)**: for every Lichess blunder, the bundled material-only engine (`engine.js`, Web Worker) runs 5s on the pre- and post-blunder positions. If mover-POV swing `S0 - S1 >= 100cp` → material, else `positional`. Material splits into:
   - `simple material miss` — had a winning line (`S0 >= 150`) and threw it (`S1 <= 50`), i.e. missed a material win;
   - `simple material loss` — allowed the opponent a material win.
