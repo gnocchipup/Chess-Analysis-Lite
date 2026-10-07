@@ -9,8 +9,8 @@ body{margin:0;padding:12px;background:var(--bg);color:var(--fg);font:14px system
 .bw{display:flex;gap:6px}
 #bar{width:18px;height:var(--bs);background:#333;border-radius:3px;position:relative;overflow:hidden}
 #wh{position:absolute;bottom:0;left:0;right:0;height:50%;background:#eee;transition:height .3s}
-.board{display:grid;grid-template-columns:repeat(8,1fr);width:var(--bs);height:var(--bs);user-select:none}
-.sq{display:flex;align-items:center;justify-content:center;font-size:calc(var(--bs)/8*.8);line-height:1}
+.board{display:grid;grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);width:var(--bs);height:var(--bs);user-select:none;aspect-ratio:1/1}
+.sq{display:flex;align-items:center;justify-content:center;font-size:calc(var(--bs)/8*.8);line-height:1;min-width:0;min-height:0;overflow:hidden;aspect-ratio:1/1}
 .l{background:var(--l)}.d{background:var(--d)}
 .last{box-shadow:inset 0 0 0 100px rgba(255,235,59,.4)}
 .best{box-shadow:inset 0 0 0 4px #1e88e5}
@@ -25,7 +25,11 @@ body{margin:0;padding:12px;background:var(--bg);color:var(--fg);font:14px system
 button,select{background:#3a3733;color:var(--fg);border:0;border-radius:4px;padding:6px 12px;font-size:15px;cursor:pointer}
 #ml{max-height:200px;overflow:auto;line-height:1.9}
 .n{color:var(--mut);margin:0 3px 0 6px}.m{padding:1px 4px;border-radius:3px;cursor:pointer}.m:hover{background:#3a3733}.cur{background:#1e88e5;color:#fff}
+.row{display:flex;gap:6px;margin-top:6px}input{flex:1;min-width:0}
+#meta,#bl{color:var(--mut);font-size:12px;line-height:1.5}
+#bl b{color:var(--fg)}.bd{color:#ef5350}.ms{color:#ffb74d}.in{color:#fff176}
 textarea{width:100%;box-sizing:border-box;height:90px;background:#111;color:var(--fg);border:1px solid #333;border-radius:4px;font:12px monospace}
+#out{height:130px}
 </style></head><body>
 <div class="wrap">
   <div class="bw"><div id="bar"><div id="wh"></div></div><div id="board" class="board"></div></div>
@@ -38,7 +42,10 @@ textarea{width:100%;box-sizing:border-box;height:90px;background:#111;color:var(
     </div>
     <div id="ml" class="card"></div>
     <textarea id="pgn" placeholder="Paste PGN here">1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6 8. c3 O-O</textarea>
-    <div class="ctl"><button id="load">Load PGN</button></div>
+    <div class="card"><b>Lichess import (evals=true)</b><div class="row"><input id="lich" placeholder="https://lichess.org/xxxxxxxx" style="flex:1;background:#111;color:var(--fg);border:1px solid #333;border-radius:4px;padding:6px;font:12px monospace"><button id="fetch">Fetch</button></div><div id="meta">Paste a Lichess game link, or paste any PGN below.</div></div>
+    <div class="ctl"><button id="load">Load PGN</button><button id="cls">Classify blunders (5s each)</button></div>
+    <div id="bl" class="card">No blunder analysis yet.</div>
+    <div class="card"><b>Annotated PGN</b><div class="row"><button id="exp">Update preview</button><button id="dl">Download</button><button id="cp">Copy</button></div><textarea id="out" placeholder="Annotated PGN will appear here"></textarea></div>
   </div>
 </div>
 <script src="engine.js"></script>
@@ -47,6 +54,7 @@ const $ = id => document.getElementById(id);
 const START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 const GL = { k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟\uFE0E' };
 let fens = [START], sans = [], ucis = [], ply = 0, flip = false, worker = null, timer = 0, infos = [], best = '';
+let tags = {}, evals = [null], nags = [''], cmts = [''], verdicts = [''], blunders = [], lichEvals = [null];
 const sanEng = new Engine();
 
 const sqs = u => [[u.charCodeAt(0) - 97, +u[1] - 1], [u.charCodeAt(2) - 97, +u[3] - 1]];
@@ -74,9 +82,13 @@ function moveList() {
   const first = fens[0].split(' ')[1] === 'w';
   let h = '';
   sans.forEach((s, i) => {
+    const k = i + 1;
     if ((i % 2 === 0) === first) h += `<span class="n">${Math.floor((i + (first ? 0 : 1)) / 2) + 1}.</span>`;
     else if (i === 0) h += '<span class="n">1…</span>';
-    h += `<span class="m ${i + 1 === ply ? 'cur' : ''}" data-i="${i + 1}">${s}</span> `;
+    const v = verdicts[k] || '';
+    const cls = blunders.includes(k) ? (v.includes('positional') ? 'in' : v.includes('miss') ? 'ms' : 'bd') : '';
+    h += `<span class="m ${k === ply ? 'cur' : ''} ${cls}" data-i="${k}">${s}</span> `;
+    if (v) h += `<span style="color:var(--mut);font-size:11px">[${v}]</span> `;
   });
   $('ml').innerHTML = h || 'No moves';
 }
@@ -130,26 +142,224 @@ function show(i) {
   const cur = document.querySelector('.cur'); if (cur) cur.scrollIntoView({ block: 'nearest' });
 }
 
-function loadPgn() {
-  let t = $('pgn').value, fen = START;
+function loadPgn(raw) {
+  let t = raw !== undefined ? raw : $('pgn').value, fen = START;
+  tags = {}; evals = [null]; nags = ['']; cmts = ['']; verdicts = ['']; blunders = []; lichEvals = [null];
+  const hm = [...t.matchAll(/\[([A-Za-z0-9_]+)\s+"([^"]*)"\]/g)];
+  hm.forEach(m => tags[m[1]] = m[2]);
   const fm = t.match(/\[FEN\s+"([^"]+)"\]/); if (fm) fen = fm[1];
-  t = t.replace(/\[[^\]]*\]/g, ' ').replace(/\{[^}]*\}/g, ' ').replace(/;[^\n]*/g, ' ');
-  while (/\([^()]*\)/.test(t)) t = t.replace(/\([^()]*\)/g, ' ');
-  const toks = t.replace(/\$\d+/g, ' ').replace(/\d+\.(\.\.)?/g, ' ').split(/\s+/)
-    .map(s => s.replace(/[!?]+$/, '')).filter(s => s && !/^(1-0|0-1|1\/2-1\/2|\*)$/.test(s));
+  if (raw !== undefined) $('pgn').value = t;
+  t = t.replace(/\[[^\]]*\]\s*/g, ' ');
+  // tokenize: keep comments, NAGs, moves, results
+  const toks = []; let i = 0;
+  while (i < t.length) {
+    const c = t[i];
+    if (c === '{') { const j = t.indexOf('}', i); toks.push(t.slice(i, j < 0 ? t.length : j + 1)); i = j < 0 ? t.length : j + 1; }
+    else if (c === ';') { let j = t.indexOf('\n', i); if (j < 0) j = t.length; toks.push('{' + t.slice(i + 1, j) + '}'); i = j; }
+    else if (c === '(') { let d = 1, j = i + 1; while (j < t.length && d) { if (t[j] === '(') d++; else if (t[j] === ')') d--; j++; } i = j; }
+    else if (/\s/.test(c)) i++;
+    else if (c === '$') { const m = t.slice(i).match(/^\$\d+/); toks.push(m[0]); i += m[0].length; }
+    else { const m = t.slice(i).match(/^[^\s{}();$]+/); toks.push(m[0]); i += m[0].length; }
+  }
   const e = new Engine(fen);
   fens = [fen]; sans = []; ucis = [];
-  let err = '';
-  for (const s of toks) {
-    const m = e.moveFromSan(s);
-    if (!m) { err = 'Stopped at unreadable move: ' + s; break; }
-    sans.push(e.san(m)); ucis.push(Engine.str(m)); e.make(m); fens.push(e.fen());
+  let err = '', pendEval = null, pendClk = null, pendCmt = [], pendNag = '', firstMove = true;
+  const pushMove = s => {
+    const san = s.replace(/[!?]+$/, '');
+    const m = e.moveFromSan(san);
+    if (!m) { err = 'Stopped at unreadable move: ' + s; return false; }
+    let full = e.san(m);
+    const suf = (s.match(/[!?]+$/) || [''])[0]; if (suf && !full.endsWith(suf)) full += suf;
+    sans.push(full); ucis.push(Engine.str(m));
+    // eval extraction: prefer [%eval x] in pending comment
+    let ev = pendEval;
+    for (const c of pendCmt) { const em = c.match(/\[%eval\s+([+-]?\d+(?:\.\d+)?)(?:,(\d+))?\]/); if (em) { let v = Math.round(+em[1] * 100); if (em[2] !== undefined) v = v >= 0 ? 100000 - (+em[2]) * 2 : -100000 - (+em[2]) * 2; ev = v; } const cm = c.match(/\[%clk\s+([^\]]+)\]/); if (cm) pendClk = cm[1]; }
+    e.make(m); fens.push(e.fen());
+    evals.push(ev); lichEvals.push(ev); nags.push(pendNag); cmts.push(pendCmt.filter(c => !/\[%(eval|clk)[^\]]*\]/.test(c)).join(' ').trim()); verdicts.push('');
+    pendEval = null; pendClk = null; pendCmt = []; pendNag = '';
+    return true;
+  };
+  for (const tok of toks) {
+    if (/^(1-0|0-1|1\/2-1\/2|\*)$/.test(tok)) { tags.Result = tags.Result || tok; break; }
+    else if (/^\d+\.(\.\.)?$/.test(tok)) continue;
+    else if (/^\{.*\}$/s.test(tok)) {
+      const inner = tok.slice(1, -1);
+      const em = inner.match(/\[%eval\s+([+-]?\d+(?:\.\d+)?)(?:,(\d+))?\]/);
+      let ev = null;
+      if (em) { ev = Math.round(+em[1] * 100); if (em[2] !== undefined) ev = ev >= 0 ? 100000 - (+em[2]) * 2 : -100000 - (+em[2]) * 2; }
+      const cm = inner.match(/\[%clk\s+([^\]]+)\]/);
+      if (ev !== null && sans.length && (evals[sans.length] === null || evals[sans.length] === undefined) && pendEval === null && !pendCmt.length) {
+        // comment FOLLOWS the move it annotates (Lichess style: "e4 { [%eval 0.17] }") — attach to previous move
+        evals[sans.length] = ev; lichEvals[sans.length] = ev;
+        if (cm) { /* clock ignored for now */ }
+        const clean = inner.replace(/\[%(eval|clk)[^\]]*\]/g, '').trim();
+        if (clean) cmts[sans.length] = (cmts[sans.length] ? cmts[sans.length] + ' ' : '') + clean;
+      } else {
+        pendCmt.push(inner);
+        if (ev !== null) pendEval = ev;
+      }
+    }
+    else if (/^\$\d+$/.test(tok)) pendNag = tok;
+    else if (/^[!?]+$/.test(tok)) { if (sans.length || nags.length > 1) { const k = sans.length; nags[k] = (nags[k] || '') + tok; sans[k - 1] = (sans[k - 1] || '') + tok; } }
+    else { firstMove = false; if (!pushMove(tok)) break; }
   }
-  show(0);
+  detectLocal().then(() => { meta(); renderBl(); moveList(); });
+  meta(); show(0); renderBl();
   if (err) $('hdr').textContent = err;
 }
 
-$('load').onclick = loadPgn;
+// blunder detection: reuse server markers (?? or $4) + local eval drop >=100cp from local engine (2s)
+function pov(ev, moverIsWhite) { // lichess evals are white-pov cp; convert to mover-pov
+  if (ev === null || ev === undefined) return null;
+  if (Math.abs(ev) > 90000) return ev > 0 ? (moverIsWhite ? 99900 : -99900) : (moverIsWhite ? -99900 : 99900);
+  return moverIsWhite ? ev : -ev;
+}
+async function detectLocal() {
+  blunders = [];
+  const isLich = !!evals.slice(1).find(v => v !== null && v !== undefined);
+  if (!isLich) { // no server evals: run quick local scan ~400ms/pos for eval drop
+    for (let k = 1; k <= sans.length; k++) {
+      const sc = await engScore(fens[k - 1], 400);
+      evals[k] = sc; lichEvals[k] = null;
+    }
+  }
+  for (let k = 1; k <= sans.length; k++) {
+    const moverWhite = fens[k - 1].split(' ')[1] === 'w';
+    const prev = pov(k === 1 ? (lichEvals[0] ?? evals[0] ?? 20) : evals[k - 1], moverWhite);
+    const cur = pov(evals[k], moverWhite);
+    const nagB = (nags[k] || '').includes('$4') || /⁇|\?\?/.test(sans[k - 1] || '');
+    let drop = (prev !== null && cur !== null) ? prev - cur : null;
+    if (nagB || (drop !== null && drop >= 100 && isLichBlunder(prev, cur, k))) blunders.push(k);
+    else if (!isLich && drop !== null && drop >= 100) blunders.push(k);
+  }
+}
+function isLichBlunder(prev, cur, k) {
+  // Lichess thresholds scale with position; approximate: drop>=100cp qualifies as candidate,
+  // but server ?? markers always count. Local fallback uses flat 100cp per user spec.
+  return true;
+}
+function engScore(fen, ms) {
+  return new Promise(res => {
+    const w = new Worker('engine.js'); let got = null;
+    w.onmessage = ev => { if (!ev.data.done) got = ev.data; };
+    w.postMessage({ fen, ms, depth: 30, multipv: 1 });
+    setTimeout(() => { try { w.terminate(); } catch (_) {} res(got ? got.score * (fen.split(' ')[1] === 'w' ? 1 : -1) : null); }, ms + 60);
+  });
+}
+function meta() {
+  const w = tags.White || '?', b = tags.Black || '?', wr = tags.WhiteElo ? ` (${tags.WhiteElo})` : '', br = tags.BlackElo ? ` (${tags.BlackElo})` : '';
+  const extra = [tags.Event, tags.Site && tags.Site.includes('lichess') ? 'lichess.org' : tags.Site, tags.Opening, tags.ECO, tags.Result].filter(Boolean).join(' · ');
+  $('meta').textContent = `${w}${wr} vs ${b}${br}` + (extra ? ` — ${extra}` : '') + (blunders.length ? ` — ${blunders.length} blunder(s)` : '');
+}
+
+function renderBl() {
+  if (!blunders.length) { $('bl').innerHTML = sans.length ? 'No blunders detected (need ?? markers or ≥100cp eval drop).' : 'No blunder analysis yet.'; return; }
+  $('bl').innerHTML = '<b>Blunders:</b><br>' + blunders.map(k => {
+    const mv = Math.floor((k - 1) / 2) + 1, w = fens[k - 1].split(' ')[1] === 'w';
+    const v = verdicts[k] ? ` — <b>${verdicts[k]}</b>` : ' — <i>unclassified (press Classify)</i>';
+    return `${mv}.${w ? '' : '..'} ${sans[k - 1]}${v}`;
+  }).join('<br>');
+}
+
+// Task 5+6: for each Lichess blunder, run material engine 5s on pre+post positions.
+// If material swing >=100cp (mover-pov) => material; then missed win vs allowed loss:
+//   bestPre (mover) vs actual post (mover-pov): if bestPre - postAfter >= 100 => allowed loss? refine:
+//   - missed win: pre-move best line already winning (>=+200 mover) and played move throws it (post <= +50)
+//   - material loss: post-move opponent best reply wins material (oppPV score high)
+// Simplified deterministic rule using material engine scores:
+//   S0 = engine(fens[k-1]) mover-pov, S1 = -engine(fens[k]) mover-pov (opp reply baked in)
+//   B0 = best PV first-move SAN + score. If S0 - S1 >=100 => material.
+//     if S0 >=150 and S1 <=50 => "simple material miss" (had win, missed it)
+//     else => "simple material loss" (allowed opponent win)
+//   else => "positional"
+async function classify() {
+  if (!blunders.length) { $('bl').textContent = 'No blunders to classify. Load a Lichess game first.'; return; }
+  $('bl').textContent = 'Classifying with material engine (5s × 2 per blunder)…';
+  for (const k of blunders) {
+    const moverWhite = fens[k - 1].split(' ')[1] === 'w';
+    const sgn = moverWhite ? 1 : -1;
+    const r0 = await engFull(fens[k - 1], 5000), r1 = await engFull(fens[k], 5000);
+    const S0 = r0 ? r0.score * sgn : null, S1 = r1 ? -r1.score * sgn : null;
+    let v = 'positional';
+    if (S0 !== null && S1 !== null && (S0 - S1) >= 100) {
+      v = (S0 >= 150 && S1 <= 50) ? 'simple material miss' : 'simple material loss';
+      // extra signal: if best PV shows immediate capture/win, keep miss label
+      if (r0 && r0.pv && r0.pv.length && S0 >= 150) v = 'simple material miss';
+    }
+    verdicts[k] = v;
+    // append comment for export: "blunder — <verdict>"
+    const tag = `blunder — ${v}`;
+    cmts[k] = cmts[k] ? cmts[k] + ' ' + tag : tag;
+    renderBl(); moveList();
+  }
+  $('bl').innerHTML += '<br>Done. Use “Update preview” to refresh annotated PGN.';
+}
+function engFull(fen, ms) {
+  return new Promise(res => {
+    const w = new Worker('engine.js'); let infos = [];
+    w.onmessage = ev => { if (!ev.data.done) infos[ev.data.multipv] = ev.data; };
+    w.postMessage({ fen, ms, depth: 60, multipv: 1 });
+    setTimeout(() => { try { w.terminate(); } catch (_) {} const o = infos[1]; res(o ? { score: o.score * (fen.split(' ')[1] === 'w' ? 1 : -1), pv: o.pv } : null); }, ms + 80);
+  });
+}
+
+function buildPgn() {
+  let h = '';
+  const order = ['Event', 'Site', 'Date', 'Round', 'White', 'Black', 'Result', 'ECO', 'Opening', 'WhiteElo', 'BlackElo', 'TimeControl', 'Termination'];
+  for (const k of order) if (tags[k]) h += `[${k} "${tags[k]}"]\n`;
+  for (const k of Object.keys(tags)) if (!order.includes(k) && k !== 'FEN') h += `[${k} "${tags[k]}"]\n`;
+  if (fens[0] !== START) h += `[FEN "${fens[0]}"]\n`;
+  h += '\n';
+  const first = fens[0].split(' ')[1] === 'w';
+  let num = 1, wtm = first;
+  sans.forEach((s, i) => {
+    const k = i + 1;
+    if (wtm) h += num + '. ';
+    else if (i === 0) h += num + '... ';
+    h += s + ' ';
+    if (nags[k] && !/\?\?|⁇/.test(s)) h += nags[k] + ' ';
+    const bits = [];
+    if (lichEvals[k] !== null && lichEvals[k] !== undefined) {
+      const e = lichEvals[k];
+      bits.push(Math.abs(e) > 90000 ? `[#${e > 0 ? '+' : '-'}]` : `[%eval ${(e / 100).toFixed(2)}]`);
+    }
+    if (cmts[k]) bits.push(cmts[k]);
+    if (verdicts[k]) bits.push(`blunder — ${verdicts[k]}`);
+    // dedupe verdict if already in cmts
+    let cmt = bits.filter((v, ix) => bits.indexOf(v) === ix).join(' ').replace(/blunder — .*?blunder — /g, 'blunder — ');
+    // strip dup verdict
+    if (verdicts[k] && (cmt.match(new RegExp('blunder — ' + verdicts[k], 'g')) || []).length > 1)
+      cmt = cmt.replace(new RegExp(' \\{?blunder — ' + verdicts[k] + '\\}?$'), '');
+    if (bits.length) h += '{ ' + bits.join(' ').replace(/[{}]/g, '') + ' } ';
+    if (!wtm) num++;
+    wtm = !wtm;
+  });
+  h += (tags.Result || '*') + '\n';
+  return h;
+}
+
+async function fetchLich() {
+  const v = $('lich').value.trim();
+  const m = v.match(/(?:lichess\.org\/)([A-Za-z0-9]{8})(?:\/\w+\/?)?/);
+  const id = m ? m[1] : (v.match(/^[A-Za-z0-9]{8}$/) ? v : null);
+  if (!id) { $('meta').textContent = 'Paste a valid Lichess URL like https://lichess.org/abcdef12'; return; }
+  $('meta').textContent = 'Fetching from Lichess…';
+  try {
+    const url = `https://lichess.org/game/export/${id}?moves=1&tags=1&clocks=1&evals=1&opening=1&literate=1`;
+    const r = await fetch(url, { headers: { Accept: 'application/x-chess-pgn' } });
+    if (!r.ok) throw new Error('HTTP ' + r.status + ' — game may be private or missing evals');
+    const pgn = await r.text();
+    loadPgn(pgn);
+    $('meta').textContent += ' · imported with evals=true';
+  } catch (err) { $('meta').textContent = 'Fetch failed: ' + err.message + ' (tip: paste the PGN manually — Lichess → Share → Export PGN with evals).'; }
+}
+
+$('load').onclick = () => loadPgn();
+$('fetch').onclick = fetchLich;
+$('cls').onclick = classify;
+$('exp').onclick = () => { $('out').value = buildPgn(); };
+$('dl').onclick = () => { const b = new Blob([$('out').value || buildPgn()], { type: 'application/x-chess-pgn' }); const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = 'annotated.pgn'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); };
+$('cp').onclick = async () => { $('out').value = $('out').value || buildPgn(); try { await navigator.clipboard.writeText($('out').value); $('hdr').textContent = 'Annotated PGN copied'; } catch (_) { $('out').select(); document.execCommand('copy'); } };
 $('b0').onclick = () => show(0); $('b1').onclick = () => show(ply - 1);
 $('b2').onclick = () => show(ply + 1); $('b3').onclick = () => show(fens.length - 1);
 $('fl').onclick = () => { flip = !flip; draw(); };
