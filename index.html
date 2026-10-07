@@ -149,7 +149,10 @@ function loadPgn(raw) {
   hm.forEach(m => tags[m[1]] = m[2]);
   const fm = t.match(/\[FEN\s+"([^"]+)"\]/); if (fm) fen = fm[1];
   if (raw !== undefined) $('pgn').value = t;
-  t = t.replace(/\[[^\]]*\]\s*/g, ' ');
+  // Strip PGN header tags only: header lines look like [Key "value"] at line start.
+  // The old /\\[[^\\]]*\\]\\s*/g also ate inline [%eval ...] / [%clk ...] comments,
+  // leaving every eval null and forcing the no-server-evals local fallback path.
+  t = t.replace(/^[ \t]*\[[A-Za-z0-9_]+\s+"[^"]*"\][ \t]*\r?$/gm, ' ');
   // tokenize: keep comments, NAGs, moves, results
   const toks = []; let i = 0;
   while (i < t.length) {
@@ -171,9 +174,9 @@ function loadPgn(raw) {
     let full = e.san(m);
     const suf = (s.match(/[!?]+$/) || [''])[0]; if (suf && !full.endsWith(suf)) full += suf;
     sans.push(full); ucis.push(Engine.str(m));
-    // eval extraction: prefer [%eval x] in pending comment
+    // eval extraction: prefer [%eval x] / [%eval #N] (mate) in pending comment
     let ev = pendEval;
-    for (const c of pendCmt) { const em = c.match(/\[%eval\s+([+-]?\d+(?:\.\d+)?)(?:,(\d+))?\]/); if (em) { let v = Math.round(+em[1] * 100); if (em[2] !== undefined) v = v >= 0 ? 100000 - (+em[2]) * 2 : -100000 - (+em[2]) * 2; ev = v; } const cm = c.match(/\[%clk\s+([^\]]+)\]/); if (cm) pendClk = cm[1]; }
+    for (const c of pendCmt) { const em = c.match(/\[%eval\s+(?:#(-?\d+)|([+-]?\d+(?:\.\d+)?))(?:,(\d+))?\]/); if (em) { ev = em[1] !== undefined ? mateScore(+em[1]) : Math.round(+em[2] * 100); if (em[3] !== undefined && em[1] === undefined) ev = ev >= 0 ? 100000 - (+em[3]) * 2 : -100000 - (+em[3]) * 2; } const cm = c.match(/\[%clk\s+([^\]]+)\]/); if (cm) pendClk = cm[1]; }
     e.make(m); fens.push(e.fen());
     evals.push(ev); lichEvals.push(ev); nags.push(pendNag); cmts.push(pendCmt.filter(c => !/\[%(eval|clk)[^\]]*\]/.test(c)).join(' ').trim()); verdicts.push('');
     pendEval = null; pendClk = null; pendCmt = []; pendNag = '';
@@ -184,9 +187,9 @@ function loadPgn(raw) {
     else if (/^\d+\.(\.\.)?$/.test(tok)) continue;
     else if (/^\{.*\}$/s.test(tok)) {
       const inner = tok.slice(1, -1);
-      const em = inner.match(/\[%eval\s+([+-]?\d+(?:\.\d+)?)(?:,(\d+))?\]/);
+      const em = inner.match(/\[%eval\s+(?:#(-?\d+)|([+-]?\d+(?:\.\d+)?))(?:,(\d+))?\]/);
       let ev = null;
-      if (em) { ev = Math.round(+em[1] * 100); if (em[2] !== undefined) ev = ev >= 0 ? 100000 - (+em[2]) * 2 : -100000 - (+em[2]) * 2; }
+      if (em) { ev = em[1] !== undefined ? mateScore(+em[1]) : Math.round(+em[2] * 100); if (em[3] !== undefined && em[1] === undefined) ev = ev >= 0 ? 100000 - (+em[3]) * 2 : -100000 - (+em[3]) * 2; }
       const cm = inner.match(/\[%clk\s+([^\]]+)\]/);
       if (ev !== null && sans.length && (evals[sans.length] === null || evals[sans.length] === undefined) && pendEval === null && !pendCmt.length) {
         // comment FOLLOWS the move it annotates (Lichess style: "e4 { [%eval 0.17] }") — attach to previous move
@@ -208,7 +211,10 @@ function loadPgn(raw) {
   if (err) $('hdr').textContent = err;
 }
 
-// blunder detection: reuse server markers (?? or $4) + local eval drop >=100cp from local engine (2s)
+// blunder detection: trust Lichess server markers (?? / $4) only when server evals exist.
+// Pasted PGNs without server evals fall back to a quick local scan (~400ms/pos, >=100cp drop).
+// Mate scores ([%eval #N]) map to +/-99900 so "8.65 -> Mate in 6" no longer reads as null.
+function mateScore(n) { return n > 0 ? 99900 : n < 0 ? -99900 : 0; }
 function pov(ev, moverIsWhite) { // lichess evals are white-pov cp; convert to mover-pov
   if (ev === null || ev === undefined) return null;
   if (Math.abs(ev) > 90000) return ev > 0 ? (moverIsWhite ? 99900 : -99900) : (moverIsWhite ? -99900 : 99900);
@@ -228,15 +234,10 @@ async function detectLocal() {
     const prev = pov(k === 1 ? (lichEvals[0] ?? evals[0] ?? 20) : evals[k - 1], moverWhite);
     const cur = pov(evals[k], moverWhite);
     const nagB = (nags[k] || '').includes('$4') || /⁇|\?\?/.test(sans[k - 1] || '');
+    if (isLich) { if (nagB) blunders.push(k); continue; } // Lichess game: only ?? markers count
     let drop = (prev !== null && cur !== null) ? prev - cur : null;
-    if (nagB || (drop !== null && drop >= 100 && isLichBlunder(prev, cur, k))) blunders.push(k);
-    else if (!isLich && drop !== null && drop >= 100) blunders.push(k);
+    if (drop !== null && drop >= 100) blunders.push(k); // local-only game: flat 100cp rule
   }
-}
-function isLichBlunder(prev, cur, k) {
-  // Lichess thresholds scale with position; approximate: drop>=100cp qualifies as candidate,
-  // but server ?? markers always count. Local fallback uses flat 100cp per user spec.
-  return true;
 }
 function engScore(fen, ms) {
   return new Promise(res => {
