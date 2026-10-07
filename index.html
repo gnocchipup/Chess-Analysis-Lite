@@ -266,9 +266,9 @@ function renderBl() {
 //   bestPre (mover) vs actual post (mover-pov): if bestPre - postAfter >= 100 => allowed loss? refine:
 //   - missed win: pre-move best line already winning (>=+200 mover) and played move throws it (post <= +50)
 //   - material loss: post-move opponent best reply wins material (oppPV score high)
-// Simplified deterministic rule using material engine scores:
-//   S0 = engine(fens[k-1]) mover-pov, S1 = -engine(fens[k]) mover-pov (opp reply baked in)
-//   B0 = best PV first-move SAN + score. If S0 - S1 >=100 => material.
+// Simplified deterministic rule using material engine scores (both White-POV via engFull):
+//   S0 = engine(fens[k-1]) mover-pov, S1 = engine(fens[k]) mover-pov (opp reply baked into search)
+//   If S0 - S1 >=100 => material.
 //     if S0 >=150 and S1 <=50 => "simple material miss" (had win, missed it)
 //     else => "simple material loss" (allowed opponent win)
 //   else => "positional"
@@ -279,12 +279,12 @@ async function classify() {
     const moverWhite = fens[k - 1].split(' ')[1] === 'w';
     const sgn = moverWhite ? 1 : -1;
     const r0 = await engFull(fens[k - 1], 5000), r1 = await engFull(fens[k], 5000);
-    const S0 = r0 ? r0.score * sgn : null, S1 = r1 ? -r1.score * sgn : null;
+    // engFull returns White-POV, so × sgn converts to mover-POV. No extra negation:
+    // post-move search already includes the opponent's best reply.
+    const S0 = r0 ? r0.score * sgn : null, S1 = r1 ? r1.score * sgn : null;
     let v = 'positional';
     if (S0 !== null && S1 !== null && (S0 - S1) >= 100) {
       v = (S0 >= 150 && S1 <= 50) ? 'simple material miss' : 'simple material loss';
-      // extra signal: if best PV shows immediate capture/win, keep miss label
-      if (r0 && r0.pv && r0.pv.length && S0 >= 150) v = 'simple material miss';
     }
     verdicts[k] = v;
     // append comment for export: "blunder — <verdict>"
